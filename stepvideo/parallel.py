@@ -2,7 +2,6 @@ import torch.distributed as dist
 import xfuser
 import torch
 
-
 def initialize_parall_group(ring_degree, ulysses_degree):
     dist.init_process_group("nccl")
     xfuser.core.distributed.init_distributed_environment(
@@ -15,7 +14,10 @@ def initialize_parall_group(ring_degree, ulysses_degree):
         ring_degree=ring_degree,
         ulysses_degree=ulysses_degree,
     )
-    torch.cuda.set_device(dist.get_rank())
+    # Ensure that the device ordinal is within valid bounds.
+    device_count = torch.cuda.device_count()
+    device_id = dist.get_rank() % device_count
+    torch.cuda.set_device(device_id)
 
 def get_parallel_group():
     return xfuser.core.distributed.get_world_group()
@@ -28,8 +30,6 @@ def get_sequence_parallel_rank():
 
 def get_sp_group():
     return xfuser.core.distributed.parallel_state.get_sp_group()
-
-
 
 def parallel_forward(fn_):
     def wrapTheFunction(_, hidden_states, *args, **kwargs):

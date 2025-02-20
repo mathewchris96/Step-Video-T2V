@@ -32,12 +32,27 @@ def call_api_gen(url, api, port=8080):
         
         async with aiohttp.ClientSession() as sess:
             data_bytes = pickle.dumps(data)
+            import json
+
             async with sess.get(url, data=data_bytes, timeout=12000) as response:
                 result = bytearray()
                 while not response.content.at_eof():
                     chunk = await response.content.read(1024)
                     result += chunk
-                response_data = pickle.loads(result)
+                try:
+                    response_data = pickle.loads(result)
+                except Exception as pickle_err:
+                    # Fallback: try to interpret the response as JSON.
+                    try:
+                        # Decode to string and parse JSON
+                        response_json = json.loads(result.decode('utf-8'))
+                        # Optionally, re-serialize to pickle to have a consistent format.
+                        response_data = response_json
+                    except Exception as json_err:
+                        raise Exception(
+                            f"Failed to parse response with pickle ({pickle_err}) or JSON ({json_err})."
+                        )
+
         return response_data
         
     return _fn

@@ -16,7 +16,7 @@ from stepvideo.utils import VideoProcessor
 
 
 def call_api_gen(url, api, port=8080):
-    url =f"https://{url}:{port}/{api}-api"
+    url =f"https://{url}/{api}-api"
     import aiohttp
     async def _fn(samples, *args, **kwargs):
         if api=='vae':

@@ -16,47 +16,54 @@ from stepvideo.utils import VideoProcessor
 
 
 def call_api_gen(url, api, port=8080):
-    url =f"https://{url}/{api}-api"
+    # Construct the URL without the port if you want to use the public endpoint.
+    full_url = f"https://{url}/{api}-api"
+    print(f"[DEBUG] Constructed URL for {api}: {full_url}")
+    
     import aiohttp
     async def _fn(samples, *args, **kwargs):
-        if api=='vae':
-            data = {
-                    "samples": samples,
-                }
+        # Build the request data based on the API type.
+        if api == 'vae':
+            data = {"samples": samples}
         elif api == 'caption':
-            data = {
-                    "prompts": samples,
-                }
+            data = {"prompts": samples}
         else:
             raise Exception(f"Not supported api: {api}...")
         
-        async with aiohttp.ClientSession() as sess:
-            data_bytes = pickle.dumps(data)
-            import json
-
-            async with sess.get(url, data=data_bytes, timeout=12000) as response:
-                result = bytearray()
-                while not response.content.at_eof():
-                    chunk = await response.content.read(1024)
-                    result += chunk
-                try:
-                    response_data = pickle.loads(result)
-                except Exception as pickle_err:
-                    # Fallback: try to interpret the response as JSON.
-                    try:
-                        # Decode to string and parse JSON
-                        response_json = json.loads(result.decode('utf-8'))
-                        # Optionally, re-serialize to pickle to have a consistent format.
-                        response_data = response_json
-                    except Exception as json_err:
-                        raise Exception(
-                            f"Failed to parse response with pickle ({pickle_err}) or JSON ({json_err})."
-                        )
-
-        return response_data
+        # Pickle the data to be sent.
+        data_bytes = pickle.dumps(data)
+        print(f"[DEBUG] Pickled payload for {api} ({len(data_bytes)} bytes): {data}")
         
-    return _fn
+        async with aiohttp.ClientSession() as sess:
+            try:
+                print(f"[DEBUG] Sending GET request to {full_url} ...")
+                async with sess.get(full_url, data=data_bytes, timeout=12000) as response:
+                    result = bytearray()
+                    while not response.content.at_eof():
+                        chunk = await response.content.read(1024)
+                        result += chunk
+                    print(f"[DEBUG] Received raw response of {len(result)} bytes from {full_url}")
+            except Exception as req_err:
+                print(f"[ERROR] Request failed for {full_url}: {req_err}")
+                raise req_err
 
+            try:
+                response_data = pickle.loads(result)
+                print(f"[DEBUG] Successfully unpickled response from {full_url}")
+                print(f"[DEBUG] Unpickled response keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
+            except Exception as pickle_err:
+                print(f"[WARNING] Pickle load failed for {full_url}: {pickle_err}. Trying JSON parsing.")
+                try:
+                    response_json = json.loads(result.decode('utf-8'))
+                    response_data = response_json
+                    print(f"[DEBUG] Successfully parsed JSON response from {full_url}")
+                except Exception as json_err:
+                    err_msg = (f"Failed to parse response with pickle ({pickle_err}) "
+                               f"or JSON ({json_err}).")
+                    print(f"[ERROR] {err_msg}")
+                    raise Exception(err_msg)
+        return response_data
+    return _fn
 
 
 

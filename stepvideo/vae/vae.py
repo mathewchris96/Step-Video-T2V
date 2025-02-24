@@ -38,13 +38,13 @@ def base_group_norm(x, norm_layer, act_silu=False, channel_last=False):
     else:
         if channel_last:
             # Permute to NCHW format
-            x = x.permute(0, 3, 1, 2)
+            x = x.permute(0, 4, 1, 2, 3)
         out = F.group_norm(x.contiguous(), norm_layer.num_groups, norm_layer.weight, norm_layer.bias, norm_layer.eps)
         if act_silu:
             out = F.silu(out)
         if channel_last:
             # Permute back to NHWC format
-            out = out.permute(0, 2, 3, 1)
+            out = out.permute(0, 2, 3, 4, 1)
     return out
 
 def base_conv2d(x, conv_layer, channel_last=False, residual=None):

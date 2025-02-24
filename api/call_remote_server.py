@@ -170,7 +170,11 @@ class RemoteServer(object):
 
 
     def run(self, host="0.0.0.0", port=8080):
-        self.app.run(host, port=port, threaded=True, debug=False)
+        print(f"🔥 Starting Flask server on {host}:{port} with endpoints:")
+        for rule in self.app.url_map.iter_rules():
+            print(f"➡️ {rule}")
+        self.app.run(host, port=port, threaded=True, debug=True)
+
 
 
 if __name__ == "__main__":

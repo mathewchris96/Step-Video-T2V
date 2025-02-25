@@ -38,6 +38,7 @@ class StepVaePipeline(Resource):
         self.loaded = False
 
     def load_model(self):
+        print(f"[VAE] Starting to load VAE model from: {self.vae_dir}")
         from stepvideo.vae.vae import AutoencoderKL
         (model_name, z_channels) = ("vae_v2.safetensors", 64) if self.version == 2 else ("vae.safetensors", 16)
         model_path = os.path.join(self.vae_dir, model_name)
@@ -46,11 +47,12 @@ class StepVaePipeline(Resource):
             model_path=model_path,
             version=self.version,
         ).to(dtype).to(device).eval()
-        print("Initialized VAE model.")
         self.loaded = True
+        print(f"[VAE] VAE model loaded successfully from: {model_path}")
 
     def decode(self, samples, *args, **kwargs):
         if not self.loaded or self.vae is None:
+            print("[VAE] decode() called but VAE model is still loading.")
             return "VAE model is still loading."
         with torch.no_grad():
             try:
@@ -79,6 +81,7 @@ class VAEapi(Resource):
                 feature = {k: v for k, v in feature.items() if v is not None}
                 video_latents = self.vae_pipeline.decode(**feature)
                 if isinstance(video_latents, str):  # Model still loading
+                    print("[VAEapi] VAE model is still loading.")
                     return Response(video_latents, status=503)
                 response = pickle.dumps(video_latents)
             except Exception as e:
@@ -96,16 +99,20 @@ class CaptionPipeline(Resource):
         self.loaded = False
 
     def load_models(self):
+        print(f"[Caption] Starting to load text encoder from: {self.llm_dir}")
+        print(f"[Caption] Starting to load clip encoder from: {self.clip_dir}")
         from stepvideo.text_encoder.stepllm import STEP1TextEncoder
         from stepvideo.text_encoder.clip import HunyuanClip
         self.text_encoder = STEP1TextEncoder(self.llm_dir, max_length=320).to(dtype).to(device).eval()
-        print("Initialized text encoder.")
+        print("[Caption] Text encoder loaded successfully.")
         self.clip = HunyuanClip(self.clip_dir, max_length=77).to(device).eval()
-        print("Initialized clip encoder.")
+        print("[Caption] Clip encoder loaded successfully.")
         self.loaded = True
+        print("[Caption] Caption models are fully loaded.")
 
     def embedding(self, prompts, *args, **kwargs):
         if not self.loaded or self.text_encoder is None or self.clip is None:
+            print("[Caption] embedding() called but Caption models are still loading.")
             return "Caption model is still loading."
         with torch.no_grad():
             try:
@@ -137,6 +144,7 @@ class Captionapi(Resource):
                 feature = {k: v for k, v in feature.items() if v is not None}
                 embeddings = self.caption_pipeline.embedding(**feature)
                 if isinstance(embeddings, str):  # Model still loading
+                    print("[Captionapi] Caption models are still loading.")
                     return Response(embeddings, status=503)
                 response = pickle.dumps(embeddings)
             except Exception as e:
@@ -156,7 +164,7 @@ class RemoteServer(object):
         api = Api(self.app)
 
         # Preload VAE
-        print("Loading VAE model...")
+        print("[RemoteServer] Initializing VAE pipeline...")
         self.vae_pipeline = StepVaePipeline(
             vae_dir=os.path.join(args.model_dir, args.vae_dir)
         )
@@ -165,10 +173,10 @@ class RemoteServer(object):
             "/vae-api",
             resource_class_args=[self.vae_pipeline],
         )
-        print("VAE model loaded.")
+        print("[RemoteServer] VAE pipeline initialized (lazy load mode).")
 
         # Preload Caption Encoder & CLIP
-        print("Loading Caption Encoder and CLIP model...")
+        print("[RemoteServer] Initializing Caption pipeline...")
         self.caption_pipeline = CaptionPipeline(
             llm_dir=os.path.join(args.model_dir, args.llm_dir), 
             clip_dir=os.path.join(args.model_dir, args.clip_dir)
@@ -178,28 +186,34 @@ class RemoteServer(object):
             "/caption-api",
             resource_class_args=[self.caption_pipeline],
         )
-        print("Caption & CLIP model loaded.")
+        print("[RemoteServer] Caption pipeline initialized (lazy load mode).")
 
     def run(self, host="0.0.0.0", port=8080):
-        print("Starting Flask Server...")
+        print("[RemoteServer] Starting Flask Server on {}:{}".format(host, port))
         self.app.run(host, port=port, threaded=True, debug=False)
-
 
 # Function to start heavy model loading in background threads.
 def start_model_loading(remote_server_instance):
+    print("[ModelLoader] Starting background threads to load heavy models...")
     # Start VAE loading in one thread:
-    threading.Thread(target=remote_server_instance.vae_pipeline.load_model, daemon=True).start()
+    vae_thread = threading.Thread(target=remote_server_instance.vae_pipeline.load_model, daemon=True)
+    vae_thread.start()
+    print("[ModelLoader] VAE loading thread started.")
     # Start Caption models loading in another thread:
-    threading.Thread(target=remote_server_instance.caption_pipeline.load_models, daemon=True).start()
+    caption_thread = threading.Thread(target=remote_server_instance.caption_pipeline.load_models, daemon=True)
+    caption_thread.start()
+    print("[ModelLoader] Caption loading thread started.")
 
 if __name__ == "__main__":
     args = parsed_args()
+    print("[Main] Parsed arguments:", args)
     flask_server = RemoteServer(args)
     
     # Start heavy model loading in background.
     start_model_loading(flask_server)
     
-    print("🔥 Starting Flask server on 0.0.0.0:8080 with endpoints:")
+    print("[Main] Registered endpoints:")
     for rule in flask_server.app.url_map.iter_rules():
         print("➡️", rule)
+    
     flask_server.run(host="0.0.0.0", port=args.port)

@@ -154,7 +154,9 @@ class RemoteServer(object):
         root = Blueprint("root", __name__)
         self.app.register_blueprint(root)
         api = Api(self.app)
-        
+
+        # Preload VAE
+        print("Loading VAE model...")
         self.vae_pipeline = StepVaePipeline(
             vae_dir=os.path.join(args.model_dir, args.vae_dir)
         )
@@ -163,9 +165,12 @@ class RemoteServer(object):
             "/vae-api",
             resource_class_args=[self.vae_pipeline],
         )
-        
+        print("VAE model loaded.")
+
+        # Preload Caption Encoder & CLIP
+        print("Loading Caption Encoder and CLIP model...")
         self.caption_pipeline = CaptionPipeline(
-            llm_dir=os.path.join(args.model_dir, args.llm_dir),
+            llm_dir=os.path.join(args.model_dir, args.llm_dir), 
             clip_dir=os.path.join(args.model_dir, args.clip_dir)
         )
         api.add_resource(
@@ -173,9 +178,12 @@ class RemoteServer(object):
             "/caption-api",
             resource_class_args=[self.caption_pipeline],
         )
+        print("Caption & CLIP model loaded.")
 
     def run(self, host="0.0.0.0", port=8080):
+        print("Starting Flask Server...")
         self.app.run(host, port=port, threaded=True, debug=False)
+
 
 # Function to start heavy model loading in background threads.
 def start_model_loading(remote_server_instance):

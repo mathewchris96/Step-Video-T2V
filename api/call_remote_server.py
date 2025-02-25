@@ -1,15 +1,13 @@
-import os
-import threading
-import time
-import argparse
-import pickle
-
-from flask import Flask, Response, request, Blueprint
-from flask_restful import Api, Resource
-
 import torch
+import os
+from flask import Flask, Response, jsonify, request, Blueprint
+from flask_restful import Api, Resource
+import pickle
+import argparse
+import threading
+import argparse
 
-# Set device and dtype
+
 device = f'cuda:{torch.cuda.device_count()-1}'
 torch.cuda.set_device(device)
 dtype = torch.bfloat16
@@ -24,137 +22,125 @@ def parsed_args():
     args = parser.parse_args()
     return args
 
-##############################################
-# Modified Pipeline Classes with Lazy Loading
-##############################################
+
 
 class StepVaePipeline(Resource):
     def __init__(self, vae_dir, version=2):
-        # Initially, do not load the model
-        self.vae_dir = vae_dir
-        self.version = version
-        self.vae = None
+        self.vae = self.build_vae(vae_dir, version)
         self.scale_factor = 1.0
-        self.loaded = False
 
-    def load_model(self):
-        print(f"[VAE] Starting to load VAE model from: {self.vae_dir}")
+    def build_vae(self, vae_dir, version=2):
         from stepvideo.vae.vae import AutoencoderKL
-        (model_name, z_channels) = ("vae_v2.safetensors", 64) if self.version == 2 else ("vae.safetensors", 16)
-        model_path = os.path.join(self.vae_dir, model_name)
-        self.vae = AutoencoderKL(
+        (model_name, z_channels) = ("vae_v2.safetensors", 64) if version == 2 else ("vae.safetensors", 16)
+        model_path = os.path.join(vae_dir, model_name) 
+        
+        model = AutoencoderKL(
             z_channels=z_channels,
             model_path=model_path,
-            version=self.version,
+            version=version,
         ).to(dtype).to(device).eval()
-        self.loaded = True
-        print(f"[VAE] VAE model loaded successfully from: {model_path}")
-
+        print("Inintialized vae...")
+        return model
+ 
     def decode(self, samples, *args, **kwargs):
-        if not self.loaded or self.vae is None:
-            print("[VAE] decode() called but VAE model is still loading.")
-            return "VAE model is still loading."
         with torch.no_grad():
             try:
-                model_dtype = next(self.vae.parameters()).dtype
-                model_device = next(self.vae.parameters()).device
-                samples = self.vae.decode(samples.to(model_dtype).to(model_device) / self.scale_factor)
-                if hasattr(samples, 'sample'):
+                dtype = next(self.vae.parameters()).dtype
+                device = next(self.vae.parameters()).device
+                samples = self.vae.decode(samples.to(dtype).to(device) / self.scale_factor)
+                if hasattr(samples,'sample'):
                     samples = samples.sample
                 return samples
-            except Exception as e:
-                print("Error during VAE decoding:", e)
+            except:
                 torch.cuda.empty_cache()
                 return None
 
 lock = threading.Lock()
-
 class VAEapi(Resource):
     def __init__(self, vae_pipeline):
         self.vae_pipeline = vae_pipeline
-
+        
     def get(self):
         with lock:
             try:
                 feature = pickle.loads(request.get_data())
                 feature['api'] = 'vae'
-                feature = {k: v for k, v in feature.items() if v is not None}
+            
+                feature = {k:v for k, v in feature.items() if v is not None}
                 video_latents = self.vae_pipeline.decode(**feature)
-                if isinstance(video_latents, str):  # Model still loading
-                    print("[VAEapi] VAE model is still loading.")
-                    return Response(video_latents, status=503)
                 response = pickle.dumps(video_latents)
+
             except Exception as e:
-                print("Caught Exception in VAEapi:", e)
-                return Response(str(e), status=500)
+                print("Caught Exception: ", e)
+                return Response(e)
+            
             return Response(response)
+
+
 
 class CaptionPipeline(Resource):
     def __init__(self, llm_dir, clip_dir):
-        # Initially, do not load heavy models.
-        self.llm_dir = llm_dir
-        self.clip_dir = clip_dir
-        self.text_encoder = None
-        self.clip = None
-        self.loaded = False
-
-    def load_models(self):
-        print(f"[Caption] Starting to load text encoder from: {self.llm_dir}")
-        print(f"[Caption] Starting to load clip encoder from: {self.clip_dir}")
+        self.text_encoder = self.build_llm(llm_dir)
+        self.clip = self.build_clip(clip_dir)
+        
+    def build_llm(self, model_dir):
         from stepvideo.text_encoder.stepllm import STEP1TextEncoder
+        text_encoder = STEP1TextEncoder(model_dir, max_length=320).to(dtype).to(device).eval()
+        print("Inintialized text encoder...")
+        return text_encoder
+        
+    def build_clip(self, model_dir):
         from stepvideo.text_encoder.clip import HunyuanClip
-        self.text_encoder = STEP1TextEncoder(self.llm_dir, max_length=320).to(dtype).to(device).eval()
-        print("[Caption] Text encoder loaded successfully.")
-        self.clip = HunyuanClip(self.clip_dir, max_length=77).to(device).eval()
-        print("[Caption] Clip encoder loaded successfully.")
-        self.loaded = True
-        print("[Caption] Caption models are fully loaded.")
-
+        clip = HunyuanClip(model_dir, max_length=77).to(device).eval()
+        print("Inintialized clip encoder...")
+        return clip
+ 
     def embedding(self, prompts, *args, **kwargs):
-        if not self.loaded or self.text_encoder is None or self.clip is None:
-            print("[Caption] embedding() called but Caption models are still loading.")
-            return "Caption model is still loading."
         with torch.no_grad():
             try:
                 y, y_mask = self.text_encoder(prompts)
+                    
                 clip_embedding, _ = self.clip(prompts)
+                
                 len_clip = clip_embedding.shape[1]
-                y_mask = torch.nn.functional.pad(y_mask, (len_clip, 0), value=1)  # pad attention_mask with clip's length 
+                y_mask = torch.nn.functional.pad(y_mask, (len_clip, 0), value=1)   ## pad attention_mask with clip's length 
+
                 data = {
                     'y': y.detach().cpu(),
                     'y_mask': y_mask.detach().cpu(),
                     'clip_embedding': clip_embedding.to(torch.bfloat16).detach().cpu()
                 }
+
                 return data
             except Exception as err:
-                print("Error during caption embedding:", err)
+                print(f"{err}")
                 return None
 
-lock = threading.Lock()
 
+
+lock = threading.Lock()
 class Captionapi(Resource):
     def __init__(self, caption_pipeline):
         self.caption_pipeline = caption_pipeline
-
+        
     def get(self):
         with lock:
             try:
                 feature = pickle.loads(request.get_data())
                 feature['api'] = 'caption'
-                feature = {k: v for k, v in feature.items() if v is not None}
+            
+                feature = {k:v for k, v in feature.items() if v is not None}
                 embeddings = self.caption_pipeline.embedding(**feature)
-                if isinstance(embeddings, str):  # Model still loading
-                    print("[Captionapi] Caption models are still loading.")
-                    return Response(embeddings, status=503)
                 response = pickle.dumps(embeddings)
+
             except Exception as e:
-                print("Caught Exception in Captionapi:", e)
-                return Response(str(e), status=500)
+                print("Caught Exception: ", e)
+                return Response(e)
+            
             return Response(response)
 
-##############################################
-# Remote Server Definition
-##############################################
+
+
 
 class RemoteServer(object):
     def __init__(self, args) -> None:
@@ -162,9 +148,7 @@ class RemoteServer(object):
         root = Blueprint("root", __name__)
         self.app.register_blueprint(root)
         api = Api(self.app)
-
-        # Preload VAE
-        print("[RemoteServer] Initializing VAE pipeline...")
+        
         self.vae_pipeline = StepVaePipeline(
             vae_dir=os.path.join(args.model_dir, args.vae_dir)
         )
@@ -173,10 +157,7 @@ class RemoteServer(object):
             "/vae-api",
             resource_class_args=[self.vae_pipeline],
         )
-        print("[RemoteServer] VAE pipeline initialized (lazy load mode).")
-
-        # Preload Caption Encoder & CLIP
-        print("[RemoteServer] Initializing Caption pipeline...")
+        
         self.caption_pipeline = CaptionPipeline(
             llm_dir=os.path.join(args.model_dir, args.llm_dir), 
             clip_dir=os.path.join(args.model_dir, args.clip_dir)
@@ -186,34 +167,14 @@ class RemoteServer(object):
             "/caption-api",
             resource_class_args=[self.caption_pipeline],
         )
-        print("[RemoteServer] Caption pipeline initialized (lazy load mode).")
+
 
     def run(self, host="0.0.0.0", port=8080):
-        print("[RemoteServer] Starting Flask Server on {}:{}".format(host, port))
         self.app.run(host, port=port, threaded=True, debug=False)
 
-# Function to start heavy model loading in background threads.
-def start_model_loading(remote_server_instance):
-    print("[ModelLoader] Starting background threads to load heavy models...")
-    # Start VAE loading in one thread:
-    vae_thread = threading.Thread(target=remote_server_instance.vae_pipeline.load_model, daemon=True)
-    vae_thread.start()
-    print("[ModelLoader] VAE loading thread started.")
-    # Start Caption models loading in another thread:
-    caption_thread = threading.Thread(target=remote_server_instance.caption_pipeline.load_models, daemon=True)
-    caption_thread.start()
-    print("[ModelLoader] Caption loading thread started.")
 
 if __name__ == "__main__":
     args = parsed_args()
-    print("[Main] Parsed arguments:", args)
     flask_server = RemoteServer(args)
-    
-    # Start heavy model loading in background.
-    start_model_loading(flask_server)
-    
-    print("[Main] Registered endpoints:")
-    for rule in flask_server.app.url_map.iter_rules():
-        print("➡️", rule)
-    
     flask_server.run(host="0.0.0.0", port=args.port)
+    
